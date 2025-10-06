@@ -1,0 +1,18 @@
+{
+  "@microsoft/generator-sharepoint": {
+    "plusBeta": false,
+    "isCreatingSolution": true,
+    "nodeVersion": "18.18.0",
+    "sdksVersions": {},
+    "version": "1.21.1",
+    "libraryName": "prompt-buddy",
+    "libraryId": "f77d9f3d-6f2d-4da9-b236-94e79a45e27f",
+    "environment": "spo",
+    "packageManager": "npm",
+    "solutionName": "PromptBuddy",
+    "solutionShortDescription": "PromptBuddy description",
+    "skipFeatureDeployment": true,
+    "isDomainIsolated": false,
+    "componentType": "webpart"
+  }
+}
