@@ -57,42 +57,46 @@ function Load-CsvInBatches {
         [int]    $BatchSize = 50000
     )
 
-    # SQL connection
+    # Build SQL connection
     $connString = "Server=$Server;Database=$Database;Integrated Security=SSPI"
     $connection = New-Object System.Data.SqlClient.SqlConnection($connString)
     $connection.Open()
 
-    # BulkCopy setup
+    # Load SQL columns using SqlCommand
+    $cmd = $connection.CreateCommand()
+    $cmd.CommandText = @"
+SELECT COLUMN_NAME
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME = 'AuditLog' AND TABLE_SCHEMA = 'dbo'
+"@
+
+    $reader = $cmd.ExecuteReader()
+    $sqlColumns = @()
+
+    while ($reader.Read()) {
+        $sqlColumns += $reader["COLUMN_NAME"]
+    }
+    $reader.Close()
+
+    # Configure SqlBulkCopy
     $bulkCopy = New-Object System.Data.SqlClient.SqlBulkCopy($connection)
     $bulkCopy.DestinationTableName = $Table
     $bulkCopy.BatchSize = $BatchSize
     $bulkCopy.BulkCopyTimeout = 0
 
-    # Load CSV parser
+    # CSV parser
     $parser = New-Object Microsoft.VisualBasic.FileIO.TextFieldParser($FilePath)
     $parser.TextFieldType = "Delimited"
     $parser.SetDelimiters(",")
 
-    # Read CSV header
+    # CSV header
     $headers = $parser.ReadFields()
 
-    # Get SQL table columns
-    $sqlColumnsQuery = @"
-SELECT COLUMN_NAME 
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME = 'AuditLog' AND TABLE_SCHEMA = 'dbo'
-"@
-
-    $sqlColumns = Invoke-Sqlcmd -ServerInstance $Server -Database $Database -Query $sqlColumnsQuery |
-                  Select-Object -ExpandProperty COLUMN_NAME
-
-    # Create DataTable ONLY with matching columns
+    # Create DataTable only for matching columns
     $dt = New-Object System.Data.DataTable
 
     foreach ($h in $headers) {
         $clean = $h.Trim()
-
-        # Only map columns that exist in SQL table
         if ($sqlColumns -contains $clean) {
             $null = $dt.Columns.Add($clean)
             $null = $bulkCopy.ColumnMappings.Add($clean, $clean)
@@ -105,13 +109,11 @@ WHERE TABLE_NAME = 'AuditLog' AND TABLE_SCHEMA = 'dbo'
     while (-not $parser.EndOfData) {
         $fields = $parser.ReadFields()
 
-        # DataRow only for matched columns
         $row = $dt.NewRow()
-        $colIndex = 0
 
+        # Fill ONLY matched columns
         foreach ($col in $dt.Columns) {
             $row[$col.ColumnName] = $fields[$headers.IndexOf($col.ColumnName)]
-            $colIndex++
         }
 
         $dt.Rows.Add($row)
@@ -123,7 +125,7 @@ WHERE TABLE_NAME = 'AuditLog' AND TABLE_SCHEMA = 'dbo'
         }
     }
 
-    # Flush final batch
+    # Final push
     if ($dt.Rows.Count -gt 0) {
         $bulkCopy.WriteToServer($dt)
     }
@@ -133,6 +135,7 @@ WHERE TABLE_NAME = 'AuditLog' AND TABLE_SCHEMA = 'dbo'
 
     return $rowCount
 }
+
 
 
 ##############################################################
@@ -192,4 +195,5 @@ foreach ($file in $files) {
 }
 
 "[$(Get-Date)] === Import Job Finished ===" | Out-File $LogFile -Append
+
 
