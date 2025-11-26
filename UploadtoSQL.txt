@@ -1,134 +1,164 @@
-# ======================================================
-# CONFIG
-# ======================================================
-$SiteUrl       = "https://tenant.sharepoint.com/sites/DataLoad"
-$CSVFolder     = "AuditFiles"
-$TempPath      = "C:\Temp\BulkCSV"
+##############################################################
+# CONFIGURATION
+##############################################################
 
-$SqlServer     = "SQLSERVER01"
-$SqlDB         = "AuditDB"
-$SqlTable      = "dbo.AuditLog"
+# === ONEDRIVE SITE URL (OneDrive for Business only) ===
+$SiteUrl = "https://tenant-my.sharepoint.com/personal/yourid_tenant_com"
 
-$BatchSize     = 50000     # Commit every 50k rows
+# Folder inside OneDrive (as seen in browser)  
+# Example: Documents/AuditFiles
+$CSVFolder = "Documents/AuditFiles"
 
-# ======================================================
-# PREP
-# ======================================================
-if(!(Test-Path $TempPath)) { New-Item -Path $TempPath -ItemType Directory | Out-Null }
+# Local temp folder
+$TempPath = "C:\DataImport\Incoming"
+$ProcessedPath = "C:\DataImport\Processed"
 
-Import-Module PnP.PowerShell
+# SQL Server settings
+$SqlServer = "SQLSERVER01"
+$SqlDatabase = "AuditDB"
+$SqlTable = "dbo.AuditLog"
 
+# Batch size for SqlBulkCopy (50k recommended for 1M+ rows)
+$BatchSize = 50000
+
+# Log file
+$LogFile = "C:\DataImport\ImportLog_$(Get-Date -Format yyyyMMdd).txt"
+
+##############################################################
+# PREPARATION
+##############################################################
+
+# Create folders if not exist
+foreach ($p in @($TempPath, $ProcessedPath)) {
+    if (!(Test-Path $p)) {
+        New-Item -Path $p -ItemType Directory | Out-Null
+    }
+}
+
+"[$(Get-Date)] === Import Job Started ===" | Out-File $LogFile -Append
+
+# Load modules
+Import-Module PnP.PowerShell -ErrorAction Stop
+Add-Type -AssemblyName "Microsoft.VisualBasic"
+
+# Connect to OneDrive
 Connect-PnPOnline -Url $SiteUrl -Interactive
 
-$csvFiles = Get-PnPFolderItem -FolderSiteRelativeUrl $CSVFolder -ItemType File |
-            Where-Object { $_.Name -like "*.csv" }
+##############################################################
+# FUNCTION: Load CSV in batch (FAST)
+##############################################################
 
-Write-Host "Found $($csvFiles.Count) CSV files..." -ForegroundColor Cyan
+function Load-CsvInBatches {
+    param(
+        [string] $FilePath,
+        [string] $Server,
+        [string] $Database,
+        [string] $Table,
+        [int]    $BatchSize = 50000
+    )
 
-
-# ======================================================
-# MAIN LOOP
-# ======================================================
-
-foreach ($file in $csvFiles) {
-
-    $LocalFile = Join-Path $TempPath $file.Name
-
-    Write-Host "`nDownloading: $($file.Name)"
-    Get-PnPFile -ServerRelativeUrl $file.ServerRelativeUrl `
-                -Path $TempPath -FileName $file.Name `
-                -AsFile -Force
-
-    Write-Host "Bulk importing to SQL: $SqlTable ..." -ForegroundColor Yellow
-
-    # SQL connection
-    $connString = "Server=$SqlServer;Database=$SqlDB;Integrated Security=SSPI"
+    $connString = "Server=$Server;Database=$Database;Integrated Security=SSPI"
     $connection = New-Object System.Data.SqlClient.SqlConnection($connString)
     $connection.Open()
 
-    # Setup Bulk Copy
     $bulkCopy = New-Object System.Data.SqlClient.SqlBulkCopy($connection)
-    $bulkCopy.DestinationTableName = $SqlTable
+    $bulkCopy.DestinationTableName = $Table
     $bulkCopy.BatchSize = $BatchSize
-    $bulkCopy.BulkCopyTimeout = 0  # unlimited
+    $bulkCopy.BulkCopyTimeout = 0
 
-    # ======================================================
-    # COLUMN MAPPING (auto-maps based on CSV header)
-    # ======================================================
-    $reader = [System.IO.StreamReader]::new($LocalFile)
-    $header = $reader.ReadLine().Split(",")
+    # CSV parser
+    $parser = New-Object Microsoft.VisualBasic.FileIO.TextFieldParser($FilePath)
+    $parser.TextFieldType = "Delimited"
+    $parser.SetDelimiters(",")
 
-    foreach ($col in $header) {
-        $bulkCopy.ColumnMappings.Add($col, $col) | Out-Null
+    # Read header
+    $headers = $parser.ReadFields()
+
+    # Create DataTable
+    $dt = New-Object System.Data.DataTable
+    foreach ($h in $headers) {
+        $null = $dt.Columns.Add($h)
+        $null = $bulkCopy.ColumnMappings.Add($h, $h)
     }
 
-    # ======================================================
-    # CREATE DATA READER OBJECT FOR STREAMING
-    # ======================================================
-    class CsvDataReader : System.Data.IDataReader {
-        [System.IO.StreamReader] $reader
-        [string[]] $headers
-        [string[]] $currentRow
+    $rowCount = 0
 
-        CsvDataReader([System.IO.StreamReader] $r, [string[]] $h) {
-            $this.reader = $r
-            $this.headers = $h
+    while (-not $parser.EndOfData) {
+        $fields = $parser.ReadFields()
+        $dt.Rows.Add($fields) | Out-Null
+        $rowCount++
+
+        if ($dt.Rows.Count -ge $BatchSize) {
+            $bulkCopy.WriteToServer($dt)
+            $dt.Clear()
         }
-
-        bool Read() {
-            $line = $this.reader.ReadLine()
-            if ($null -eq $line) { return $false }
-            $this.currentRow = $line.Split(",")
-            return $true
-        }
-
-        object GetValue([int] $i) {
-            return $this.currentRow[$i]
-        }
-
-        int FieldCount() { return $this.headers.Length }
-
-        # Unused members
-        void Close() { $this.reader.Close() }
-        int Depth() { return 0 }
-        bool IsClosed() { return $false }
-        int RecordsAffected() { return -1 }
-        bool NextResult() { return $false }
-        string GetName([int] $i) { return $this.headers[$i] }
-        string GetDataTypeName([int] $i) { return "string" }
-        Type GetFieldType([int] $i) { return [string] }
-        int GetOrdinal([string] $name) { return [Array]::IndexOf($this.headers,$name) }
-        bool GetBoolean([int] $i) { return [bool]$this.currentRow[$i] }
-        byte GetByte([int] $i) { return [byte]$this.currentRow[$i] }
-        long GetBytes(...) { throw "Not implemented"; }
-        char GetChar([int] $i) { return [char]$this.currentRow[$i] }
-        long GetChars(...) { throw "Not implemented"; }
-        IDataReader GetData([int] $i) { return $null }
-        DateTime GetDateTime([int] $i) { return [DateTime]$this.currentRow[$i] }
-        decimal GetDecimal([int] $i) { return [Decimal]$this.currentRow[$i] }
-        double GetDouble([int] $i) { return [double]$this.currentRow[$i] }
-        float GetFloat([int] $i) { return [float]$this.currentRow[$i] }
-        Guid GetGuid([int] $i) { return [Guid]$this.currentRow[$i] }
-        short GetInt16([int] $i) { return [int16]$this.currentRow[$i] }
-        int GetInt32([int] $i) { return [int]$this.currentRow[$i] }
-        long GetInt64([int] $i) { return [long]$this.currentRow[$i] }
-        string GetString([int] $i) { return $this.currentRow[$i] }
-        int GetValues([object[]] $v) { return 0 }
-        bool IsDBNull([int] $i) { return [string]::IsNullOrEmpty($this.currentRow[$i]) }
-        object this[int $i] { get { return $this.currentRow[$i] } }
-        object this[string $n] { get { return $this.currentRow[$this.GetOrdinal($n)] } }
     }
 
-    # Create streaming reader
-    $csvReader = [CsvDataReader]::new($reader, $header)
+    # Final batch
+    if ($dt.Rows.Count -gt 0) {
+        $bulkCopy.WriteToServer($dt)
+    }
 
-    # ======================================================
-    # BULK COPY EXECUTION (FASTEST METHOD)
-    # ======================================================
-    $bulkCopy.WriteToServer($csvReader)
-
-    $csvReader.Close()
+    $parser.Close()
     $connection.Close()
 
-    Write-Host "Imported $($file.Name) successfully." -ForegroundColor Green
+    return $rowCount
 }
+
+##############################################################
+# MAIN LOGIC: Get CSVs from OneDrive → Import → Move
+##############################################################
+
+# Fetch files from OneDrive folder
+$files = Get-PnPFolderItem -FolderSiteRelativeUrl $CSVFolder -ItemType File |
+         Where-Object { $_.Name -like "*.csv" }
+
+"[$(Get-Date)] Found $($files.Count) CSV files." | Out-File $LogFile -Append
+
+foreach ($file in $files) {
+
+    $LocalFile = Join-Path $TempPath $file.Name
+    $ProcessedLocalFile = Join-Path $ProcessedPath $file.Name
+
+    "[$(Get-Date)] Downloading $($file.Name)..." | Out-File $LogFile -Append
+
+    # Download from OneDrive
+    Get-PnPFile -ServerRelativeUrl $file.ServerRelativeUrl `
+                -Path $TempPath `
+                -FileName $file.Name `
+                -AsFile -Force
+
+    "[$(Get-Date)] Importing $($file.Name) into SQL..." | Out-File $LogFile -Append
+
+    try {
+        $rows = Load-CsvInBatches -FilePath $LocalFile `
+                                  -Server $SqlServer `
+                                  -Database $SqlDatabase `
+                                  -Table $SqlTable `
+                                  -BatchSize $BatchSize
+
+        "[$(Get-Date)] Completed: $($file.Name) - Rows Imported: $rows" | Out-File $LogFile -Append
+
+        # Move processed file in OneDrive
+        $destUrl = ($file.ServerRelativeUrl -replace $CSVFolder, "$CSVFolder/Processed")
+        $destUrl
+
+        Try {
+            Move-PnPFile -ServerRelativeUrl $file.ServerRelativeUrl `
+                         -TargetUrl $destUrl -Force
+        }
+        catch {
+            "[$(Get-Date)] WARNING: Could not move file in OneDrive. $_" | Out-File $LogFile -Append
+        }
+
+        # Move local copy to processed archive
+        Move-Item -Path $LocalFile -Destination $ProcessedLocalFile -Force
+
+    }
+    catch {
+        "[$(Get-Date)] ERROR importing $($file.Name): $($_.Exception.Message)" | Out-File $LogFile -Append
+        continue
+    }
+}
+
+"[$(Get-Date)] === Import Job Finished ===" | Out-File $LogFile -Append
