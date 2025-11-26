@@ -1,3 +1,11 @@
+$conn = New-Object System.Data.SqlClient.SqlConnection("Server=SQLSERVER01;Database=AuditDB;Integrated Security=SSPI")
+$conn.Open()
+$cmd = $conn.CreateCommand()
+$cmd.CommandText = "SELECT COUNT(*) FROM dbo.AuditLog"
+$cmd.ExecuteScalar()
+$conn.Close()
+
+
 ##############################################################
 # CONFIGURATION
 ##############################################################
@@ -195,5 +203,6 @@ foreach ($file in $files) {
 }
 
 "[$(Get-Date)] === Import Job Finished ===" | Out-File $LogFile -Append
+
 
 
