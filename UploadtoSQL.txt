@@ -1,0 +1,134 @@
+# ======================================================
+# CONFIG
+# ======================================================
+$SiteUrl       = "https://tenant.sharepoint.com/sites/DataLoad"
+$CSVFolder     = "AuditFiles"
+$TempPath      = "C:\Temp\BulkCSV"
+
+$SqlServer     = "SQLSERVER01"
+$SqlDB         = "AuditDB"
+$SqlTable      = "dbo.AuditLog"
+
+$BatchSize     = 50000     # Commit every 50k rows
+
+# ======================================================
+# PREP
+# ======================================================
+if(!(Test-Path $TempPath)) { New-Item -Path $TempPath -ItemType Directory | Out-Null }
+
+Import-Module PnP.PowerShell
+
+Connect-PnPOnline -Url $SiteUrl -Interactive
+
+$csvFiles = Get-PnPFolderItem -FolderSiteRelativeUrl $CSVFolder -ItemType File |
+            Where-Object { $_.Name -like "*.csv" }
+
+Write-Host "Found $($csvFiles.Count) CSV files..." -ForegroundColor Cyan
+
+
+# ======================================================
+# MAIN LOOP
+# ======================================================
+
+foreach ($file in $csvFiles) {
+
+    $LocalFile = Join-Path $TempPath $file.Name
+
+    Write-Host "`nDownloading: $($file.Name)"
+    Get-PnPFile -ServerRelativeUrl $file.ServerRelativeUrl `
+                -Path $TempPath -FileName $file.Name `
+                -AsFile -Force
+
+    Write-Host "Bulk importing to SQL: $SqlTable ..." -ForegroundColor Yellow
+
+    # SQL connection
+    $connString = "Server=$SqlServer;Database=$SqlDB;Integrated Security=SSPI"
+    $connection = New-Object System.Data.SqlClient.SqlConnection($connString)
+    $connection.Open()
+
+    # Setup Bulk Copy
+    $bulkCopy = New-Object System.Data.SqlClient.SqlBulkCopy($connection)
+    $bulkCopy.DestinationTableName = $SqlTable
+    $bulkCopy.BatchSize = $BatchSize
+    $bulkCopy.BulkCopyTimeout = 0  # unlimited
+
+    # ======================================================
+    # COLUMN MAPPING (auto-maps based on CSV header)
+    # ======================================================
+    $reader = [System.IO.StreamReader]::new($LocalFile)
+    $header = $reader.ReadLine().Split(",")
+
+    foreach ($col in $header) {
+        $bulkCopy.ColumnMappings.Add($col, $col) | Out-Null
+    }
+
+    # ======================================================
+    # CREATE DATA READER OBJECT FOR STREAMING
+    # ======================================================
+    class CsvDataReader : System.Data.IDataReader {
+        [System.IO.StreamReader] $reader
+        [string[]] $headers
+        [string[]] $currentRow
+
+        CsvDataReader([System.IO.StreamReader] $r, [string[]] $h) {
+            $this.reader = $r
+            $this.headers = $h
+        }
+
+        bool Read() {
+            $line = $this.reader.ReadLine()
+            if ($null -eq $line) { return $false }
+            $this.currentRow = $line.Split(",")
+            return $true
+        }
+
+        object GetValue([int] $i) {
+            return $this.currentRow[$i]
+        }
+
+        int FieldCount() { return $this.headers.Length }
+
+        # Unused members
+        void Close() { $this.reader.Close() }
+        int Depth() { return 0 }
+        bool IsClosed() { return $false }
+        int RecordsAffected() { return -1 }
+        bool NextResult() { return $false }
+        string GetName([int] $i) { return $this.headers[$i] }
+        string GetDataTypeName([int] $i) { return "string" }
+        Type GetFieldType([int] $i) { return [string] }
+        int GetOrdinal([string] $name) { return [Array]::IndexOf($this.headers,$name) }
+        bool GetBoolean([int] $i) { return [bool]$this.currentRow[$i] }
+        byte GetByte([int] $i) { return [byte]$this.currentRow[$i] }
+        long GetBytes(...) { throw "Not implemented"; }
+        char GetChar([int] $i) { return [char]$this.currentRow[$i] }
+        long GetChars(...) { throw "Not implemented"; }
+        IDataReader GetData([int] $i) { return $null }
+        DateTime GetDateTime([int] $i) { return [DateTime]$this.currentRow[$i] }
+        decimal GetDecimal([int] $i) { return [Decimal]$this.currentRow[$i] }
+        double GetDouble([int] $i) { return [double]$this.currentRow[$i] }
+        float GetFloat([int] $i) { return [float]$this.currentRow[$i] }
+        Guid GetGuid([int] $i) { return [Guid]$this.currentRow[$i] }
+        short GetInt16([int] $i) { return [int16]$this.currentRow[$i] }
+        int GetInt32([int] $i) { return [int]$this.currentRow[$i] }
+        long GetInt64([int] $i) { return [long]$this.currentRow[$i] }
+        string GetString([int] $i) { return $this.currentRow[$i] }
+        int GetValues([object[]] $v) { return 0 }
+        bool IsDBNull([int] $i) { return [string]::IsNullOrEmpty($this.currentRow[$i]) }
+        object this[int $i] { get { return $this.currentRow[$i] } }
+        object this[string $n] { get { return $this.currentRow[$this.GetOrdinal($n)] } }
+    }
+
+    # Create streaming reader
+    $csvReader = [CsvDataReader]::new($reader, $header)
+
+    # ======================================================
+    # BULK COPY EXECUTION (FASTEST METHOD)
+    # ======================================================
+    $bulkCopy.WriteToServer($csvReader)
+
+    $csvReader.Close()
+    $connection.Close()
+
+    Write-Host "Imported $($file.Name) successfully." -ForegroundColor Green
+}
