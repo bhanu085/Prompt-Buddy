@@ -128,9 +128,40 @@ WHERE TABLE_NAME = 'AuditLog' AND TABLE_SCHEMA = 'dbo'
         $rowCount++
 
         if ($dt.Rows.Count -ge $BatchSize) {
-            $bulkCopy.WriteToServer($dt)
-            $dt.Clear()
+
+    try {
+        $bulkCopy.WriteToServer($dt)
+    }
+    catch {
+        Write-Host "❗ SqlBulkCopy Batch Failed — Diagnosing row-by-row..." -ForegroundColor Yellow
+
+        # Test each row individually AGAIN to isolate the bad row
+        for ($i = 0; $i -lt $dt.Rows.Count; $i++) {
+
+            $single = $dt.Clone()
+            $single.ImportRow($dt.Rows[$i])
+
+            try {
+                $bulkCopy.WriteToServer($single)
+            }
+            catch {
+                Write-Host "🔥 Bad Row Index: $i" -ForegroundColor Red
+
+                # Print all column values for debugging
+                foreach ($col in $dt.Columns) {
+                    $val = $dt.Rows[$i][$col.ColumnName]
+                    Write-Host "Column: $($col.ColumnName) => Value: '$val'"
+                }
+
+                Write-Host "Actual SQL Error: $($_.Exception.Message)" -ForegroundColor Red
+                throw  # Stop execution after identifying the row
+            }
         }
+    }
+
+    $dt.Clear()
+}
+
     }
 
     # Final push
@@ -203,6 +234,7 @@ foreach ($file in $files) {
 }
 
 "[$(Get-Date)] === Import Job Finished ===" | Out-File $LogFile -Append
+
 
 
 
