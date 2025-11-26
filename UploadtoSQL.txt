@@ -57,35 +57,64 @@ function Load-CsvInBatches {
         [int]    $BatchSize = 50000
     )
 
+    # SQL connection
     $connString = "Server=$Server;Database=$Database;Integrated Security=SSPI"
     $connection = New-Object System.Data.SqlClient.SqlConnection($connString)
     $connection.Open()
 
+    # BulkCopy setup
     $bulkCopy = New-Object System.Data.SqlClient.SqlBulkCopy($connection)
     $bulkCopy.DestinationTableName = $Table
     $bulkCopy.BatchSize = $BatchSize
     $bulkCopy.BulkCopyTimeout = 0
 
-    # CSV parser
+    # Load CSV parser
     $parser = New-Object Microsoft.VisualBasic.FileIO.TextFieldParser($FilePath)
     $parser.TextFieldType = "Delimited"
     $parser.SetDelimiters(",")
 
-    # Read header
+    # Read CSV header
     $headers = $parser.ReadFields()
 
-    # Create DataTable
+    # Get SQL table columns
+    $sqlColumnsQuery = @"
+SELECT COLUMN_NAME 
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME = 'AuditLog' AND TABLE_SCHEMA = 'dbo'
+"@
+
+    $sqlColumns = Invoke-Sqlcmd -ServerInstance $Server -Database $Database -Query $sqlColumnsQuery |
+                  Select-Object -ExpandProperty COLUMN_NAME
+
+    # Create DataTable ONLY with matching columns
     $dt = New-Object System.Data.DataTable
+
     foreach ($h in $headers) {
-        $null = $dt.Columns.Add($h)
-        $null = $bulkCopy.ColumnMappings.Add($h, $h)
+        $clean = $h.Trim()
+
+        # Only map columns that exist in SQL table
+        if ($sqlColumns -contains $clean) {
+            $null = $dt.Columns.Add($clean)
+            $null = $bulkCopy.ColumnMappings.Add($clean, $clean)
+        }
     }
 
     $rowCount = 0
 
+    # Read CSV rows
     while (-not $parser.EndOfData) {
         $fields = $parser.ReadFields()
-        $dt.Rows.Add($fields) | Out-Null
+
+        # DataRow only for matched columns
+        $row = $dt.NewRow()
+        $colIndex = 0
+
+        foreach ($col in $dt.Columns) {
+            $row[$col.ColumnName] = $fields[$headers.IndexOf($col.ColumnName)]
+            $colIndex++
+        }
+
+        $dt.Rows.Add($row)
         $rowCount++
 
         if ($dt.Rows.Count -ge $BatchSize) {
@@ -94,7 +123,7 @@ function Load-CsvInBatches {
         }
     }
 
-    # Final batch
+    # Flush final batch
     if ($dt.Rows.Count -gt 0) {
         $bulkCopy.WriteToServer($dt)
     }
@@ -104,6 +133,7 @@ function Load-CsvInBatches {
 
     return $rowCount
 }
+
 
 ##############################################################
 # MAIN LOGIC: Get CSVs from OneDrive → Import → Move
@@ -162,3 +192,4 @@ foreach ($file in $files) {
 }
 
 "[$(Get-Date)] === Import Job Finished ===" | Out-File $LogFile -Append
+
