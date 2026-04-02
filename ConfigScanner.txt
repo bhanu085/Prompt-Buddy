@@ -1,9 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.IO;
-using System.Linq;
 using System.Text;
-using System.Xml.Linq;
 
 namespace ConfigScanner
 {
@@ -93,22 +92,35 @@ namespace ConfigScanner
                             continue;
                         }
 
-                        Dictionary<string, string> appSettings = ReadAppSettings(configPath);
+                        Configuration config = OpenConfig(configPath);
 
-                        if (!appSettings.TryGetValue("IsSPOOnline", out string isSPOOnlineValue))
+                        if (config.AppSettings == null ||
+                            config.AppSettings.Settings == null ||
+                            config.AppSettings.Settings.Count == 0)
                         {
-                            result.Status = "IsSPOOnline key not found";
+                            result.Status = "IsSPOOnline/AppSettings not found";
                             results.Add(result);
                             continue;
                         }
 
-                        result.IsSPOOnline = isSPOOnlineValue; // keep original value as-is
+                        string isSPOOnlineValue = GetAppSettingValue(config, "IsSPOOnline");
 
-                        if (string.Equals(isSPOOnlineValue?.Trim(), "true", StringComparison.OrdinalIgnoreCase))
+                        if (isSPOOnlineValue == null)
                         {
-                            if (appSettings.TryGetValue("AppID", out string appIdValue))
+                            result.Status = "IsSPOOnline/AppSettings not found";
+                            results.Add(result);
+                            continue;
+                        }
+
+                        result.IsSPOOnline = isSPOOnlineValue;
+
+                        if (string.Equals(isSPOOnlineValue.Trim(), "true", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string appIdValue = GetAppSettingValue(config, "AppID");
+
+                            if (appIdValue != null)
                             {
-                                result.AppID = appIdValue; // keep original value as-is
+                                result.AppID = appIdValue;
                                 result.Status = "Success";
                             }
                             else
@@ -139,33 +151,27 @@ namespace ConfigScanner
             Console.ReadLine();
         }
 
-        private static Dictionary<string, string> ReadAppSettings(string configPath)
+        private static Configuration OpenConfig(string configPath)
         {
-            XDocument doc = XDocument.Load(configPath);
-
-            XElement appSettingsElement = doc.Descendants("appSettings").FirstOrDefault();
-
-            Dictionary<string, string> settings =
-                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-            if (appSettingsElement == null)
-                return settings;
-
-            foreach (XElement addElement in appSettingsElement.Elements("add"))
+            ExeConfigurationFileMap fileMap = new ExeConfigurationFileMap
             {
-                XAttribute keyAttr = addElement.Attribute("key");
-                XAttribute valueAttr = addElement.Attribute("value");
+                ExeConfigFilename = configPath
+            };
 
-                if (keyAttr != null && !string.IsNullOrWhiteSpace(keyAttr.Value))
+            return ConfigurationManager.OpenMappedExeConfiguration(fileMap, ConfigurationUserLevel.None);
+        }
+
+        private static string GetAppSettingValue(Configuration config, string keyName)
+        {
+            foreach (KeyValueConfigurationElement setting in config.AppSettings.Settings)
+            {
+                if (string.Equals(setting.Key, keyName, StringComparison.OrdinalIgnoreCase))
                 {
-                    string key = keyAttr.Value.Trim();   // compare keys ignoring case
-                    string value = valueAttr?.Value ?? ""; // keep value as-is
-
-                    settings[key] = value;
+                    return setting.Value;
                 }
             }
 
-            return settings;
+            return null;
         }
 
         private static void WriteResultsToCsv(List<ConfigResult> results, string filePath)
