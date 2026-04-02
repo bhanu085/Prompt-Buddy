@@ -1,0 +1,213 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Xml.Linq;
+
+namespace ConfigScanner
+{
+    internal class Program
+    {
+        static void Main(string[] args)
+        {
+            string[] rootPaths =
+            {
+                @"E:\TAG\IN",
+                @"E:\TAG\OUT"
+            };
+
+            string outputCsvPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                $"ConfigScanResults_{DateTime.Now:yyyyMMdd_HHmmss}.csv");
+
+            List<ConfigResult> results = new List<ConfigResult>();
+
+            foreach (string rootPath in rootPaths)
+            {
+                if (!Directory.Exists(rootPath))
+                {
+                    results.Add(new ConfigResult
+                    {
+                        RootPath = rootPath,
+                        Mnemonic = "",
+                        ConfigPath = "",
+                        IsSPOOnline = "",
+                        AppID = "",
+                        Status = "Root path not found",
+                        ErrorMessage = ""
+                    });
+                    continue;
+                }
+
+                string[] subFolders;
+                try
+                {
+                    subFolders = Directory.GetDirectories(rootPath);
+                }
+                catch (Exception ex)
+                {
+                    results.Add(new ConfigResult
+                    {
+                        RootPath = rootPath,
+                        Mnemonic = "",
+                        ConfigPath = "",
+                        IsSPOOnline = "",
+                        AppID = "",
+                        Status = "Failed to read subfolders",
+                        ErrorMessage = ex.Message
+                    });
+                    continue;
+                }
+
+                foreach (string subFolder in subFolders)
+                {
+                    string mnemonic = Path.GetFileName(subFolder);
+                    string pgmPath = Path.Combine(subFolder, "PGM");
+                    string configPath = Path.Combine(pgmPath, "app.config");
+
+                    ConfigResult result = new ConfigResult
+                    {
+                        RootPath = rootPath,
+                        Mnemonic = mnemonic,
+                        ConfigPath = configPath,
+                        IsSPOOnline = "",
+                        AppID = "",
+                        Status = "",
+                        ErrorMessage = ""
+                    };
+
+                    try
+                    {
+                        if (!Directory.Exists(pgmPath))
+                        {
+                            result.Status = "PGM folder not found";
+                            results.Add(result);
+                            continue;
+                        }
+
+                        if (!File.Exists(configPath))
+                        {
+                            result.Status = "app.config not found";
+                            results.Add(result);
+                            continue;
+                        }
+
+                        Dictionary<string, string> appSettings = ReadAppSettings(configPath);
+
+                        if (!appSettings.TryGetValue("IsSPOOnline", out string isSPOOnlineValue))
+                        {
+                            result.Status = "IsSPOOnline key not found";
+                            results.Add(result);
+                            continue;
+                        }
+
+                        result.IsSPOOnline = isSPOOnlineValue; // keep original value as-is
+
+                        if (string.Equals(isSPOOnlineValue?.Trim(), "true", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (appSettings.TryGetValue("AppID", out string appIdValue))
+                            {
+                                result.AppID = appIdValue; // keep original value as-is
+                                result.Status = "Success";
+                            }
+                            else
+                            {
+                                result.Status = "AppID key not found";
+                            }
+                        }
+                        else
+                        {
+                            result.Status = "Success";
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Status = "Error";
+                        result.ErrorMessage = ex.Message;
+                    }
+
+                    results.Add(result);
+                }
+            }
+
+            WriteResultsToCsv(results, outputCsvPath);
+
+            Console.WriteLine("Scan completed successfully.");
+            Console.WriteLine("CSV file created at:");
+            Console.WriteLine(outputCsvPath);
+            Console.ReadLine();
+        }
+
+        private static Dictionary<string, string> ReadAppSettings(string configPath)
+        {
+            XDocument doc = XDocument.Load(configPath);
+
+            XElement appSettingsElement = doc.Descendants("appSettings").FirstOrDefault();
+
+            Dictionary<string, string> settings =
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            if (appSettingsElement == null)
+                return settings;
+
+            foreach (XElement addElement in appSettingsElement.Elements("add"))
+            {
+                XAttribute keyAttr = addElement.Attribute("key");
+                XAttribute valueAttr = addElement.Attribute("value");
+
+                if (keyAttr != null && !string.IsNullOrWhiteSpace(keyAttr.Value))
+                {
+                    string key = keyAttr.Value.Trim();   // compare keys ignoring case
+                    string value = valueAttr?.Value ?? ""; // keep value as-is
+
+                    settings[key] = value;
+                }
+            }
+
+            return settings;
+        }
+
+        private static void WriteResultsToCsv(List<ConfigResult> results, string filePath)
+        {
+            StringBuilder sb = new StringBuilder();
+
+            sb.AppendLine("RootPath,Mnemonic,ConfigPath,IsSPOOnline,AppID,Status,ErrorMessage");
+
+            foreach (ConfigResult item in results)
+            {
+                sb.AppendLine(string.Join(",",
+                    EscapeCsv(item.RootPath),
+                    EscapeCsv(item.Mnemonic),
+                    EscapeCsv(item.ConfigPath),
+                    EscapeCsv(item.IsSPOOnline),
+                    EscapeCsv(item.AppID),
+                    EscapeCsv(item.Status),
+                    EscapeCsv(item.ErrorMessage)
+                ));
+            }
+
+            File.WriteAllText(filePath, sb.ToString(), Encoding.UTF8);
+        }
+
+        private static string EscapeCsv(string value)
+        {
+            if (value == null)
+                return "\"\"";
+
+            value = value.Replace("\"", "\"\"");
+            return $"\"{value}\"";
+        }
+    }
+
+    internal class ConfigResult
+    {
+        public string RootPath { get; set; }
+        public string Mnemonic { get; set; }
+        public string ConfigPath { get; set; }
+        public string IsSPOOnline { get; set; }
+        public string AppID { get; set; }
+        public string Status { get; set; }
+        public string ErrorMessage { get; set; }
+    }
+}
