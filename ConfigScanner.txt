@@ -3,6 +3,64 @@ using System.Collections.Generic;
 using System.Configuration;
 using System.IO;
 using System.Text;
+private static X509Certificate2 GetCertificate(string thumbprint)
+{
+    using (var store = new X509Store(StoreName.My, StoreLocation.LocalMachine))
+    {
+        store.Open(OpenFlags.ReadOnly);
+
+        var certs = store.Certificates.Find(
+            X509FindType.FindByThumbprint,
+            thumbprint,
+            false
+        );
+
+        if (certs.Count == 0)
+            throw new Exception("Certificate not found in LocalMachine\\My");
+
+        return certs[0];
+    }
+}
+var certificate = GetCertificate("<thumbprint>");
+var authManager = new PnP.Framework.AuthenticationManager(clientId, certificate, tenantId);
+return authManager.GetContext(webURL);
+
+using Microsoft.Identity.Client;
+using System;
+using System.Security.Cryptography.X509Certificates;
+
+public static string TestToken(string clientId, string tenantId, X509Certificate2 certificate, string webUrl)
+{
+    var uri = new Uri(webUrl);
+    var scopes = new[] { $"{uri.Scheme}://{uri.Authority}/.default" };
+
+    var app = ConfidentialClientApplicationBuilder
+        .Create(clientId)
+        .WithTenantId(tenantId)
+        .WithCertificate(certificate)
+        .WithLogging(
+            (level, message, containsPii) =>
+            {
+                Utils.WritetoEventViewer($"MSAL {level}: {message}");
+            },
+            LogLevel.Verbose,
+            enablePiiLogging: true,
+            enableDefaultPlatformLogging: false)
+        .Build();
+
+    Utils.WritetoEventViewer("Before AcquireTokenForClient");
+
+    var result = app
+        .AcquireTokenForClient(scopes)
+        .ExecuteAsync()
+        .GetAwaiter()
+        .GetResult();
+
+    Utils.WritetoEventViewer("After AcquireTokenForClient");
+    Utils.WritetoEventViewer("Token acquired");
+
+    return result.AccessToken;
+}
 
 namespace ConfigScanner
 {
